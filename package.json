@@ -2,7 +2,7 @@
   "name": "easytopaste",
   "displayName": "EasyToPaste \u2014 one-time secret links",
   "description": "Turn the selection into a one-time, client-encrypted link. The key never reaches the service.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "nemet360",
   "license": "SEE LICENSE IN LICENSE.md",
   "homepage": "https://easytopaste.com/?utm_source=vscode&utm_medium=extension&utm_campaign=launch-2026-11",
@@ -75,6 +75,5 @@
   },
   "scripts": {
     "test": "node --test test/"
-  },
-  "devDependencies": {}
+  }
 }
