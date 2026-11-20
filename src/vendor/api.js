@@ -15,7 +15,10 @@
  * test/api.test.js rather than trusted.
  */
 
-import { DEFAULT_API_BASE } from './vendor/link.js';
+// `./link.js`, not `./vendor/link.js`: this file lives IN vendor/. The
+// wrong path shipped in 0.1.0, copied from the MCP server where the
+// layout makes it correct.
+import { DEFAULT_API_BASE } from './link.js';
 
 const USER_AGENT_PREFIX = 'easytopaste-vscode';
 

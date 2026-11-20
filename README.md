@@ -5,7 +5,7 @@ link is on your clipboard.
 
 > **Not on the Marketplace yet.** Publishing needs a Marketplace publisher
 > account, which is the owner's to create. Until then this installs from the
-> packaged file: `code --install-extension easytopaste-0.1.0.vsix`.
+> packaged file: `code --install-extension easytopaste-0.1.1.vsix`.
 
 ## What it does
 

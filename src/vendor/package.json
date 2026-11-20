@@ -1,0 +1,4 @@
+{
+  "//": "The extension itself is CommonJS, which is what VS Code loads. These vendored files are byte-identical copies of the CLI's ES modules and must stay that way, so the module type is declared HERE rather than by editing them. Without this file Node reads them as CJS and `await import()` throws 'Cannot use import statement outside a module' - which is exactly what shipped in 0.1.0.",
+  "type": "module"
+}
