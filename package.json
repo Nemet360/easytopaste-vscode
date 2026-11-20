@@ -1,0 +1,80 @@
+{
+  "name": "easytopaste",
+  "displayName": "EasyToPaste \u2014 one-time secret links",
+  "description": "Turn the selection into a one-time, client-encrypted link. The key never reaches the service.",
+  "version": "0.1.0",
+  "publisher": "nemet360",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "homepage": "https://easytopaste.com/?utm_source=vscode&utm_medium=extension&utm_campaign=launch-2026-11",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nemet360/easytopaste-vscode"
+  },
+  "bugs": {
+    "url": "https://easytopaste.com/legal/contact"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "secret",
+    "password",
+    "share",
+    "encryption",
+    "one-time"
+  ],
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=20"
+  },
+  "main": "./src/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "easytopaste.shareSelection",
+        "title": "EasyToPaste: Share selection as a one-time link"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "easytopaste.shareSelection",
+          "when": "editorHasSelection",
+          "group": "9_cutcopypaste"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "EasyToPaste",
+      "properties": {
+        "easytopaste.expiryDays": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 30,
+          "description": "Whole days until the link expires on its own."
+        },
+        "easytopaste.oneTime": {
+          "type": "boolean",
+          "default": true,
+          "description": "Destroy the secret the first time it is read."
+        },
+        "easytopaste.apiBase": {
+          "type": "string",
+          "default": "",
+          "description": "API origin. Override only for a self-hosted deployment."
+        },
+        "easytopaste.appBase": {
+          "type": "string",
+          "default": "",
+          "description": "Web-app origin used to build links. Override only for a self-hosted deployment."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "devDependencies": {}
+}
