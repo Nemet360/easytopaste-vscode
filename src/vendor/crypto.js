@@ -1,7 +1,7 @@
 /**
- * Client-side cryptography for the EasyToPaste CLI.
+ * Client-side cryptography for the EasyToPaste clients.
  *
- * This file is the terminal half of a contract the browser client already
+ * This file is the non-browser half of a contract the browser client already
  * implements (frontend/src/app/crypto/crypto.utils.ts and
  * frontend/src/app/components/create-secret/create-secret.component.ts).
  * A secret created here must open in the web app, and a secret created in the
@@ -16,14 +16,19 @@
  * test/compat.test.js re-reads those two frontend files and fails if the
  * numbers drift apart, because a silent drift means every link this CLI prints
  * is undecryptable in a browser and nothing else would notice.
+ *
+ * **There is no Node-only API in this file, deliberately.** It is vendored
+ * byte-identical into every client (`mcp/`, `vscode/`, `action/`, `chrome/`)
+ * and `work/ops/tests/test_distribution_channels.py` fails if a copy drifts.
+ * The Chrome extension runs it inside a browser service worker, where
+ * `node:crypto` cannot be imported and `Buffer` does not exist, so the two
+ * Node-isms this file used to carry are gone: WebCrypto is read from the
+ * global `crypto` object (a global in browsers, in service workers, and in
+ * Node since 18) and base64url is encoded here instead of delegated to
+ * `Buffer`. One crypto file across five clients is worth more than the few
+ * lines it saves — the envelope layout is this product's interop contract, and
+ * a second copy of it is a second place for it to drift.
  */
-
-import { webcrypto } from 'node:crypto';
-
-const { subtle } = webcrypto;
-// Bound, not destructured: webcrypto.getRandomValues checks its receiver and
-// throws ERR_INVALID_THIS when it is called detached from the Crypto object.
-const getRandomValues = webcrypto.getRandomValues.bind(webcrypto);
 
 /** Key size in bytes (AES-256). */
 export const KEY_BYTES = 32;
@@ -36,7 +41,7 @@ export const CIPHERTEXT_OFFSET = IV_BYTES + TAG_BYTES;
 /**
  * Largest inline envelope the API accepts (API_SPEC §4.1: 256 KB).
  * Anything larger is a file secret and goes through the presigned-upload path,
- * which this CLI deliberately does not implement (see README).
+ * which these clients deliberately do not implement (see README).
  */
 export const MAX_INLINE_BYTES = 256 * 1024;
 
@@ -56,28 +61,126 @@ export class EnvelopeError extends Error {
   }
 }
 
+/**
+ * The host's WebCrypto, resolved lazily and loudly.
+ *
+ * Not resolved at module load: a module that throws while loading takes the
+ * whole client down with a stack trace nobody can act on. A missing `crypto`
+ * global means Node older than 18, or a page served from an insecure origin,
+ * and both deserve a sentence that says which.
+ *
+ * @returns {Crypto}
+ */
+function webcrypto() {
+  const host = globalThis.crypto;
+  if (!host || !host.subtle || typeof host.getRandomValues !== 'function') {
+    throw new EnvelopeError(
+      'this runtime has no WebCrypto (globalThis.crypto.subtle). ' +
+        'Node 18+ provides it; a browser provides it only on a secure origin.',
+    );
+  }
+  return host;
+}
+
+/** @returns {SubtleCrypto} */
+function subtleCrypto() {
+  return webcrypto().subtle;
+}
+
+/**
+ * Fill a typed array with cryptographically strong random bytes.
+ *
+ * Called as a method on the Crypto object rather than detached: WebCrypto's
+ * `getRandomValues` checks its receiver and throws when it is not — Node
+ * raises ERR_INVALID_THIS, a browser raises an illegal-invocation TypeError.
+ *
+ * @template {Uint8Array} T
+ * @param {T} buf
+ * @returns {T}
+ */
+function fillRandom(buf) {
+  const host = webcrypto();
+  return host.getRandomValues(buf);
+}
+
+/** The base64url alphabet (RFC 4648 §5), used for output. */
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+/**
+ * Reverse lookup for decoding, built once.
+ *
+ * URL-safe alphabet only, with no entry for `+` or `/`. That is not a second
+ * guard bolted onto the regex below — the two must agree, and the regex is the
+ * one that produces the error message, so a standard-base64 string is refused
+ * there with "is not valid base64url" before this table is ever consulted.
+ * Adding `+`/`/` here would be code that can never run, which is worse than
+ * strictness: it reads as support the client does not have.
+ */
+const B64URL_INDEX = (() => {
+  const table = new Int16Array(128).fill(-1);
+  for (let i = 0; i < B64URL.length; i += 1) table[B64URL.charCodeAt(i)] = i;
+  return table;
+})();
+
 /** @returns {Uint8Array} 32 cryptographically random bytes. */
 export function generateKey() {
-  return getRandomValues(new Uint8Array(KEY_BYTES));
+  return fillRandom(new Uint8Array(KEY_BYTES));
 }
 
 /**
  * base64url-encode bytes, unpadded — the alphabet the URL fragment and the
  * API both expect.
+ *
+ * Written out rather than delegated, because `Buffer` does not exist in a
+ * browser service worker and `btoa` takes a string, which would mean building
+ * a 256 KB intermediate string out of the very bytes we are trying not to
+ * copy around.
+ *
  * @param {Uint8Array} bytes
  * @returns {string}
  */
 export function toBase64Url(bytes) {
-  return Buffer.from(bytes).toString('base64url');
+  if (!(bytes instanceof Uint8Array)) {
+    throw new EnvelopeError('toBase64Url expects bytes');
+  }
+  const parts = [];
+  let chunk = '';
+  let i = 0;
+  // Three bytes in, four characters out.
+  for (; i + 2 < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    chunk +=
+      B64URL[(n >>> 18) & 63] + B64URL[(n >>> 12) & 63] + B64URL[(n >>> 6) & 63] + B64URL[n & 63];
+    // Flushed in blocks: appending to one string for a 256 KB envelope is
+    // ~350k concatenations, and V8's rope representation makes the final read
+    // the expensive part rather than the appends.
+    if (chunk.length >= 4096) {
+      parts.push(chunk);
+      chunk = '';
+    }
+  }
+  // The tail, emitted unpadded.
+  const left = bytes.length - i;
+  if (left === 1) {
+    const n = bytes[i] << 16;
+    chunk += B64URL[(n >>> 18) & 63] + B64URL[(n >>> 12) & 63];
+  } else if (left === 2) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8);
+    chunk += B64URL[(n >>> 18) & 63] + B64URL[(n >>> 12) & 63] + B64URL[(n >>> 6) & 63];
+  }
+  parts.push(chunk);
+  return parts.join('');
 }
 
 /**
  * Decode unpadded base64url back to bytes, strictly.
  *
- * Buffer's own base64url decoder silently skips characters outside the
- * alphabet, so a truncated or corrupted fragment would decode to plausible
- * garbage and surface later as a confusing GCM failure. The shape is checked
- * first and rejected loudly instead.
+ * A lenient decoder — which is what `Buffer.from(value, 'base64url')` is, and
+ * what this used to delegate to — silently skips characters outside the
+ * alphabet, so a truncated or corrupted fragment decodes to plausible garbage
+ * and surfaces later as a confusing GCM failure. The shape is checked first
+ * and rejected loudly instead, and the loop below reads every character it was
+ * given rather than skipping any.
  *
  * @param {string} value
  * @param {string} what Label used in the error message.
@@ -90,7 +193,31 @@ export function fromBase64Url(value, what = 'value') {
   if (!/^[A-Za-z0-9_-]+={0,2}$/.test(value)) {
     throw new EnvelopeError(`${what} is not valid base64url`);
   }
-  return new Uint8Array(Buffer.from(value, 'base64url'));
+  const body = value.replace(/=+$/, '');
+  // A base64 quantum is four characters. A remainder of one cannot be produced
+  // by any encoder, so it means the string lost characters on the way here.
+  if (body.length % 4 === 1) {
+    throw new EnvelopeError(`${what} is truncated base64url`);
+  }
+  const out = new Uint8Array(Math.floor((body.length * 3) / 4));
+  let written = 0;
+  let acc = 0;
+  let bits = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const code = body.charCodeAt(i);
+    const digit = code < 128 ? B64URL_INDEX[code] : -1;
+    if (digit < 0) {
+      throw new EnvelopeError(`${what} is not valid base64url`);
+    }
+    acc = ((acc << 6) | digit) & 0xffffff;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[written] = (acc >>> bits) & 0xff;
+      written += 1;
+    }
+  }
+  return out.subarray(0, written);
 }
 
 /**
@@ -102,12 +229,16 @@ export function fromBase64Url(value, what = 'value') {
  */
 export async function encryptTextToEnvelope(plaintext, key) {
   assertKey(key);
-  const iv = getRandomValues(new Uint8Array(IV_BYTES));
-  const cryptoKey = await subtle.importKey('raw', key, { name: 'AES-GCM', length: 256 }, false, [
-    'encrypt',
-  ]);
+  const iv = fillRandom(new Uint8Array(IV_BYTES));
+  const cryptoKey = await subtleCrypto().importKey(
+    'raw',
+    key,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt'],
+  );
   const raw = new Uint8Array(
-    await subtle.encrypt(
+    await subtleCrypto().encrypt(
       { name: 'AES-GCM', iv, tagLength: TAG_BYTES * 8 },
       cryptoKey,
       new TextEncoder().encode(plaintext),
@@ -148,12 +279,16 @@ export async function decryptEnvelopeToText(envelope, key) {
   combined.set(ciphertext, 0);
   combined.set(tag, ciphertext.length);
 
-  const cryptoKey = await subtle.importKey('raw', key, { name: 'AES-GCM', length: 256 }, false, [
-    'decrypt',
-  ]);
+  const cryptoKey = await subtleCrypto().importKey(
+    'raw',
+    key,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt'],
+  );
   let plaintext;
   try {
-    plaintext = await subtle.decrypt(
+    plaintext = await subtleCrypto().decrypt(
       { name: 'AES-GCM', iv, tagLength: TAG_BYTES * 8 },
       cryptoKey,
       combined,
@@ -171,14 +306,15 @@ export async function decryptEnvelopeToText(envelope, key) {
     return new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
   } catch {
     throw new EnvelopeError(
-      'the secret decrypted correctly but is not UTF-8 text, so the CLI will not print it',
+      'the secret decrypted correctly but is not UTF-8 text, so the client will not print it',
     );
   }
 }
 
 /**
- * Overwrite key material in place. Node cannot promise the bytes were never
- * copied by the GC, so this shortens the window rather than closing it.
+ * Overwrite key material in place. A garbage-collected runtime cannot promise
+ * the bytes were never copied, so this shortens the window rather than
+ * closing it.
  * @param {Uint8Array} bytes
  */
 export function zeroize(bytes) {
